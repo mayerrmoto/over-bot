@@ -1,0 +1,188 @@
+import os
+import asyncio
+import logging
+from datetime import datetime, time
+
+from aiogram import Bot, Dispatcher, Router, types
+from aiogram.filters import Command
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
+from aiohttp import web
+
+logging.basicConfig(level=logging.INFO)
+
+TOKEN = os.getenv("8577816652:AAF77vcB83x5tEHDK__i456Wkig48TravzA
+")
+OPERATOR_ID = int(os.getenv("8497016432"))
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+router = Router()
+
+
+# ---------------- FSM ---------------- #
+
+class Form(StatesGroup):
+    name = State()
+    car_model = State()
+    car_year = State()
+    problem = State()
+
+
+# ---------------- Время ---------------- #
+
+def is_work_time() -> bool:
+    now = datetime.now().time()
+    start = time(10, 0)
+    end = time(20, 0)
+    return start <= now <= end
+
+
+# ---------------- Кнопка контакта ---------------- #
+
+share_contact_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="📱 Поделиться номером", request_contact=True)]],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+
+
+# ---------------- Старт ---------------- #
+
+@router.message(Command("start"))
+async def start_handler(message: types.Message, state: FSMContext):
+    await state.clear()
+
+    await message.answer(
+        "Здравствуйте! 👋\n"
+        "Я Over‑бот автосервиса Overdrive Auto. Помогаю быстро оформить заявку и передам её оператору.\n"
+        "Напишите, пожалуйста, что вас интересует 🚗",
+        reply_markup=share_contact_kb
+    )
+
+    await message.answer("Как могу к вам обращаться? 🙂")
+    await state.set_state(Form.name)
+
+
+# ---------------- Дневной режим ---------------- #
+
+async def send_to_operator(data, user_id):
+    text = (
+        "Новая заявка ☀️\n\n"
+        f"Имя: {data['name']}\n"
+        f"Автомобиль: {data['car_model']}\n"
+        f"Год: {data['car_year']}\n"
+        f"Запрос: {data['problem']}\n\n"
+        f"ID клиента: {user_id}\n"
+        f"Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+        "Источник: Telegram Over‑бот"
+    )
+
+    await bot.send_message(OPERATOR_ID, text)
+
+
+# ---------------- Вечерний режим ---------------- #
+
+async def send_to_operator_night(data, user_id):
+    text = (
+        "Новая заявка 🌙\n\n"
+        f"Имя: {data['name']}\n"
+        f"Автомобиль: {data['car_model']}\n"
+        f"Год: {data['car_year']}\n"
+        f"Запрос: {data['problem']}\n\n"
+        f"ID клиента: {user_id}\n"
+        f"Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+        "Источник: Telegram Over‑бот"
+    )
+
+    await bot.send_message(OPERATOR_ID, text)
+
+
+# ---------------- Сбор данных ---------------- #
+
+@router.message(Form.name)
+async def process_name(message: types.Message, state: FSMContext):
+    await state.update_data(name=message.text)
+    await message.answer("Уточните, пожалуйста, марку и модель вашего автомобиля 🚘")
+    await state.set_state(Form.car_model)
+
+
+@router.message(Form.car_model)
+async def process_car_model(message: types.Message, state: FSMContext):
+    await state.update_data(car_model=message.text)
+    await message.answer("Какой год выпуска автомобиля? 📅")
+    await state.set_state(Form.car_year)
+
+
+@router.message(Form.car_year)
+async def process_car_year(message: types.Message, state: FSMContext):
+    await state.update_data(car_year=message.text)
+    await message.answer("Что хотите сделать? Опишите проблему или выберите услугу 🔧")
+    await state.set_state(Form.problem)
+
+
+@router.message(Form.problem)
+async def process_problem(message: types.Message, state: FSMContext):
+    await state.update_data(problem=message.text)
+    data = await state.get_data()
+
+    if is_work_time():
+        await send_to_operator(data, message.from_user.id)
+        await message.answer(
+            "Спасибо! 🙌 Я оформил вашу заявку и передал оператору.\n"
+            "Обычно отвечаем в течение нескольких минут. Пожалуйста, оставайтесь на связи 📲"
+        )
+    else:
+        await send_to_operator_night(data, message.from_user.id)
+        await message.answer(
+            "Спасибо! 🙌\n"
+            "Я сохранил вашу заявку и передал её оператору.\n"
+            "Мы свяжемся с вами в ближайшее рабочее время 📲"
+        )
+
+    await state.clear()
+
+
+# ---------------- Ответы оператора ---------------- #
+
+@router.message(lambda m: m.from_user.id == OPERATOR_ID)
+async def operator_reply(message: types.Message):
+    if not message.reply_to_message:
+        await message.answer("Ответьте (reply) на сообщение клиента.")
+        return
+
+    try:
+        client_id = int(message.reply_to_message.text.split("ID клиента: ")[1].split("\n")[0])
+    except:
+        await message.answer("Не удалось определить клиента.")
+        return
+
+    await bot.copy_message(
+        chat_id=client_id,
+        from_chat_id=OPERATOR_ID,
+        message_id=message.message_id
+    )
+
+    await message.answer("Ответ отправлен клиенту.")
+
+
+# ---------------- Webhook сервер ---------------- #
+
+async def main():
+    dp.include_router(router)
+
+    app = web.Application()
+    webhook_handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
+    webhook_handler.register(app, path="/webhook")
+
+    setup_application(app, dp, bot=bot)
+
+    return app
+
+
+if __name__ == "__main__":
+    web.run_app(main(), host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+
